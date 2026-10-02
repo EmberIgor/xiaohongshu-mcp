@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"runtime/debug"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/sirupsen/logrus"
 )
@@ -40,8 +41,10 @@ type PublishVideoArgs struct {
 
 // SearchFeedsArgs 搜索内容的参数
 type SearchFeedsArgs struct {
-	Keyword string       `json:"keyword" jsonschema:"搜索关键词"`
-	Filters FilterOption `json:"filters,omitempty" jsonschema:"筛选选项"`
+	Keyword    string       `json:"keyword" jsonschema:"搜索关键词"`
+	Filters    FilterOption `json:"filters,omitempty" jsonschema:"筛选选项"`
+	MaxScrolls int          `json:"max_scrolls,omitempty" jsonschema:"最多额外滚动轮数，0-3，默认0"`
+	Limit      *int         `json:"limit,omitempty" jsonschema:"最多返回笔记数，必须为1到200"`
 }
 
 // FilterOption 筛选选项结构体
@@ -273,6 +276,7 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		&mcp.Tool{
 			Name:        "search_feeds",
 			Description: "搜索小红书内容（需要已登录）",
+			InputSchema: searchFeedsInputSchema(),
 			Annotations: &mcp.ToolAnnotations{
 				Title:        "Search Feeds",
 				ReadOnlyHint: true,
@@ -549,6 +553,19 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 	)
 
 	logrus.Infof("Registered %d MCP tools", 18)
+}
+
+func searchFeedsInputSchema() *jsonschema.Schema {
+	s, err := jsonschema.For[SearchFeedsArgs](nil)
+	if err != nil {
+		panic(err)
+	}
+	minScroll, maxScroll, minLimit, maxLimit := float64(0), float64(3), float64(1), float64(200)
+	s.Properties["max_scrolls"].Minimum = &minScroll
+	s.Properties["max_scrolls"].Maximum = &maxScroll
+	s.Properties["limit"].Minimum = &minLimit
+	s.Properties["limit"].Maximum = &maxLimit
+	return s
 }
 
 // convertToMCPResult 将自定义的 MCPToolResult 转换为官方 SDK 的格式

@@ -60,10 +60,11 @@ type NoteCard struct {
 
 // User 表示用户信息
 type User struct {
-	UserID   string `json:"userId"`
-	Nickname string `json:"nickname"`
-	NickName string `json:"nickName"`
-	Avatar   string `json:"avatar"`
+	UserID    string `json:"userId"`
+	XsecToken string `json:"xsecToken,omitempty"`
+	Nickname  string `json:"nickname"`
+	NickName  string `json:"nickName"`
+	Avatar    string `json:"avatar"`
 }
 
 // InteractInfo 表示互动信息

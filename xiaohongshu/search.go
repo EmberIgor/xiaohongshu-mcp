@@ -11,7 +11,6 @@ import (
 
 	"github.com/go-rod/rod"
 	"github.com/sirupsen/logrus"
-	"github.com/xpzouying/xiaohongshu-mcp/errors"
 	"github.com/xpzouying/xiaohongshu-mcp/humanize"
 )
 
@@ -93,8 +92,117 @@ func collectFilters(filters []FilterOption) ([]pendingFilter, error) {
 	return pending, nil
 }
 
+func ValidateSearchFilters(filters ...FilterOption) error {
+	_, err := collectFilters(filters)
+	return err
+}
+
 type SearchAction struct {
 	page *rod.Page
+}
+
+type SearchScrollConfig struct {
+	MaxScrolls int
+	Limit      int
+}
+
+func ValidateSearchOptions(maxScrolls int, limit *int) error {
+	if maxScrolls < 0 || maxScrolls > 3 {
+		return fmt.Errorf("max_scrolls must be between 0 and 3")
+	}
+	if limit != nil && (*limit < 1 || *limit > 200) {
+		return fmt.Errorf("limit must be between 1 and 200")
+	}
+	return nil
+}
+
+type rodSearchSource struct {
+	page             *rod.Page
+	stateRead        bool
+	skipInitialState bool
+}
+
+func (r rodSearchSource) signal() error { return checkSearchSignals(r.page) }
+func (r rodSearchSource) scroll() error {
+	_, e := r.page.Eval(`() => window.scrollTo(0,document.body.scrollHeight)`)
+	if e != nil {
+		return fmt.Errorf("scroll search results: %w", e)
+	}
+	return nil
+}
+func (r rodSearchSource) wait(ctx context.Context, d time.Duration) error {
+	return waitSearchDelay(ctx, d)
+}
+func (r *rodSearchSource) read() ([]Feed, error) {
+	v, e := r.page.Eval(`() => { const s=window.__INITIAL_STATE__; let f=s?.search?.feeds; if(f&&f.value!==undefined)f=f.value;else if(f&&f._value!==undefined)f=f._value; const batches=window.__xhsSearchBatches||[]; const captured=batches.splice(0); return JSON.stringify({state:Array.isArray(f)?f:[],batches:captured}); }`)
+	if e != nil {
+		return nil, fmt.Errorf("read search feed state: %w", e)
+	}
+	var snap struct {
+		State   json.RawMessage   `json:"state"`
+		Batches []json.RawMessage `json:"batches"`
+	}
+	if e = json.Unmarshal([]byte(v.Value.Str()), &snap); e != nil {
+		return nil, e
+	}
+	var out []Feed
+	decode := func(raw []byte) ([]Feed, error) {
+		if len(raw) > 0 && raw[0] == '{' {
+			return normalizeSearchItems(raw)
+		}
+		var fs []Feed
+		er := json.Unmarshal(raw, &fs)
+		return onlyNotes(fs), er
+	}
+	if !r.stateRead && !r.skipInitialState && len(snap.Batches) == 0 && len(snap.State) > 0 {
+		fs, er := decode(snap.State)
+		if er != nil {
+			return nil, er
+		}
+		out = append(out, fs...)
+	}
+	r.stateRead = true
+	for _, raw := range snap.Batches {
+		fs, er := normalizeSearchItems(raw)
+		if er != nil {
+			return nil, er
+		}
+		out = append(out, fs...)
+	}
+	return out, nil
+}
+
+func waitSearchDelay(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+func checkSearchSignals(page *rod.Page) error {
+	v, err := page.Eval(`() => { const visible=e=>{if(!e)return false;const s=getComputedStyle(e),r=e.getBoundingClientRect();return s.display!=='none'&&s.visibility!=='hidden'&&Number(s.opacity)!==0&&r.width>0&&r.height>0}; const risk=[...document.querySelectorAll('[class*=captcha],[class*=verify],[class*=risk-control],[class*=riskControl]')].some(visible); const login=[...document.querySelectorAll('[class*=login-modal],[class*=loginModal],[class*=login_dialog]')].some(visible); return {url:location.pathname,risk,login}; }`)
+	if err != nil {
+		return fmt.Errorf("inspect search risk/login state: %w", err)
+	}
+	var state struct {
+		URL   string `json:"url"`
+		Risk  bool   `json:"risk"`
+		Login bool   `json:"login"`
+	}
+	if err = v.Value.Unmarshal(&state); err != nil {
+		return fmt.Errorf("decode search risk/login state: %w", err)
+	}
+	if state.Risk {
+		return fmt.Errorf("risk_control: visible verification challenge detected")
+	}
+	if state.Login || (strings.Contains(state.URL, "/login") && (strings.HasSuffix(state.URL, "/login") || strings.Contains(state.URL, "/login/"))) {
+		return fmt.Errorf("login_required: login dialog or redirect detected")
+	}
+	return nil
 }
 
 func NewSearchAction(page *rod.Page) *SearchAction {
@@ -104,95 +212,115 @@ func NewSearchAction(page *rod.Page) *SearchAction {
 }
 
 func (s *SearchAction) Search(ctx context.Context, keyword string, filters ...FilterOption) ([]Feed, error) {
+	r, err := s.SearchWithConfig(ctx, keyword, SearchScrollConfig{}, filters...)
+	return r.Feeds, err
+}
+
+func (s *SearchAction) SearchWithConfig(ctx context.Context, keyword string, cfg SearchScrollConfig, filters ...FilterOption) (SearchOutcome, error) {
+	if err := ctx.Err(); err != nil {
+		return SearchOutcome{}, err
+	}
 	// 先校验筛选取值，必须在导航之前——写错的值不该先向平台发一次请求再报错。
 	pending, err := collectFilters(filters)
 	if err != nil {
-		return nil, err
+		return SearchOutcome{}, err
 	}
+	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
 
 	// 注意 .Context(ctx) 会替换掉 NewSearchAction 里设的 60s deadline，必须在其后重新 Timeout，
 	// 否则搜索页不 stable 时 MustWaitStable/MustWait 会永久挂起（无 deadline 可依赖）。
-	page := s.page.Context(ctx).Timeout(60 * time.Second)
+	page := s.page.Context(ctx).Timeout(90 * time.Second)
+	if _, err := page.EvalOnNewDocument(searchCaptureHook); err != nil {
+		return SearchOutcome{}, fmt.Errorf("install search capture: %w", err)
+	}
 
 	searchURL := makeSearchURL(keyword)
-	page.MustNavigate(searchURL)
-	page.MustWaitStable()
-	page.MustWait(`() => window.__INITIAL_STATE__ !== undefined`)
+	if err := page.Navigate(searchURL); err != nil {
+		return SearchOutcome{}, fmt.Errorf("search navigation failed: %w", err)
+	}
+	if err := page.WaitStable(2 * time.Second); err != nil {
+		return SearchOutcome{}, fmt.Errorf("search page did not stabilize: %w", err)
+	}
+	if err := page.Wait(rod.Eval(`() => window.__INITIAL_STATE__ !== undefined || document.readyState === 'complete'`)); err != nil {
+		return SearchOutcome{}, fmt.Errorf("search page state wait failed: %w", err)
+	}
 	humanize.Delay(ctx, humanize.AfterNavigate)
+	if err := ctx.Err(); err != nil {
+		return SearchOutcome{}, err
+	}
+	if err := checkSearchSignals(page); err != nil {
+		return SearchOutcome{}, err
+	}
 
 	if len(pending) > 0 {
 		// 悬停在筛选按钮上展开面板
-		filterButton := page.MustElement(`div.filter`)
+		filterButton, err := page.Element(`div.filter`)
+		if err != nil {
+			return SearchOutcome{}, fmt.Errorf("find filter button: %w", err)
+		}
 		if err := humanize.Hover(filterButton); err != nil {
-			return nil, fmt.Errorf("悬停筛选按钮失败: %w", err)
+			return SearchOutcome{}, fmt.Errorf("悬停筛选按钮失败: %w", err)
 		}
 		humanize.Delay(ctx, humanize.BeforeClick)
+		if err := ctx.Err(); err != nil {
+			return SearchOutcome{}, err
+		}
 
 		// 等待筛选面板出现
-		page.MustWait(`() => document.querySelector('div.filter-panel') !== null`)
+		if err := page.Wait(rod.Eval(`() => document.querySelector('div.filter-panel') !== null`)); err != nil {
+			return SearchOutcome{}, fmt.Errorf("wait filter panel: %w", err)
+		}
 
 		// 记下筛选前的结果，用来判断筛选后的数据什么时候到位
 		before := readFeedIDs(page)
+		if _, err := page.Eval(`() => { if(window.__xhsSearchBatches)window.__xhsSearchBatches.length=0 }`); err != nil {
+			return SearchOutcome{}, fmt.Errorf("reset captured search results before filters: %w", err)
+		}
 
 		// 指针先进面板，之后的移动都限制在面板内。
 		// 从按钮直接拉到选项的话，路径会有一段既不在按钮上、也还没进面板。
 		bounds, err := panelBounds(page)
 		if err != nil {
-			return nil, err
+			return SearchOutcome{}, err
 		}
 		if err := humanize.MoveInto(page, bounds); err != nil {
-			return nil, fmt.Errorf("移入筛选面板失败: %w", err)
+			return SearchOutcome{}, fmt.Errorf("移入筛选面板失败: %w", err)
 		}
 
 		// 用 ClickNoWait：筛选面板是 hover 浮层，rod 的 WaitInteractable 会误判被遮挡而死等。
 		for _, pf := range pending {
 			option, err := findFilterOption(page, pf)
 			if err != nil {
-				return nil, err
+				return SearchOutcome{}, err
 			}
 			// 每轮重取：点完一项后面板可能重排。
 			if b, err := panelBounds(page); err == nil {
 				bounds = b
 			}
 			humanize.Delay(ctx, humanize.BeforeClick)
+			if err := ctx.Err(); err != nil {
+				return SearchOutcome{}, err
+			}
 			if err := humanize.ClickNoWaitInside(option, bounds); err != nil {
-				return nil, fmt.Errorf("点击筛选选项「%s」失败: %w", pf.option, err)
+				return SearchOutcome{}, fmt.Errorf("点击筛选选项「%s」失败: %w", pf.option, err)
 			}
 		}
 
-		waitFeedsChanged(page, before, 15*time.Second)
-	}
-
-	result := page.MustEval(`() => {
-		if (window.__INITIAL_STATE__ &&
-		    window.__INITIAL_STATE__.search &&
-		    window.__INITIAL_STATE__.search.feeds) {
-			const feeds = window.__INITIAL_STATE__.search.feeds;
-			const feedsData = feeds.value !== undefined ? feeds.value : feeds._value;
-			if (feedsData) {
-				return JSON.stringify(feedsData);
-			}
+		if err := waitFeedsChanged(ctx, page, before, 15*time.Second); err != nil {
+			return SearchOutcome{}, err
 		}
-		return "";
-	}`).String()
-
-	if result == "" {
-		return nil, errors.ErrNoFeeds
 	}
-
-	var feeds []Feed
-	if err := json.Unmarshal([]byte(result), &feeds); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal feeds: %w", err)
-	}
-
-	return onlyNotes(feeds), nil
+	return collectSearch(ctx, &rodSearchSource{page: page, skipInitialState: len(pending) > 0}, cfg)
 }
 
 // feedIDsJS 读当前结果集的 id 列表，用来判断数据有没有换一批。
 const feedIDsJS = `() => {
 	const f = window.__INITIAL_STATE__?.search?.feeds;
 	const v = f ? (f.value !== undefined ? f.value : f._value) : null;
-	return v ? v.map(x => x.id).join(",") : "";
+	const ids=(v||[]).map(x=>x.id).filter(Boolean);
+	for(const b of (window.__xhsSearchBatches||[])){for(const x of (b?.data?.items||[])){if(x.id)ids.push(x.id)}}
+	return ids.join(",");
 }`
 
 func readFeedIDs(page *rod.Page) string {
@@ -211,15 +339,21 @@ func readFeedIDs(page *rod.Page) string {
 // 立即返回，等于没等——多个筛选项一起用时表现为只有一部分生效。
 //
 // 超时不报错：筛选已经点上了，宁可返回可能偏旧的数据，也不要整个搜索失败。
-func waitFeedsChanged(page *rod.Page, before string, timeout time.Duration) {
+func waitFeedsChanged(ctx context.Context, page *rod.Page, before string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if now := readFeedIDs(page); now != "" && now != before {
-			return
+		if err := ctx.Err(); err != nil {
+			return err
 		}
-		time.Sleep(300 * time.Millisecond)
+		if now := readFeedIDs(page); now != "" && now != before {
+			return nil
+		}
+		if err := waitSearchDelay(ctx, 300*time.Millisecond); err != nil {
+			return err
+		}
 	}
-	logrus.Warnf("筛选后等待结果刷新超时（%s），返回的可能是筛选前的数据", timeout)
+	logrus.Warnf("筛选后等待结果刷新超时（%s）", timeout)
+	return fmt.Errorf("filtered search results did not refresh within %s", timeout)
 }
 
 // panelBounds 取筛选面板当前占据的矩形。

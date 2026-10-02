@@ -138,6 +138,8 @@ func (s *AppServer) listFeedsHandler(c *gin.Context) {
 func (s *AppServer) searchFeedsHandler(c *gin.Context) {
 	var keyword string
 	var filters xiaohongshu.FilterOption
+	var maxScrolls, limit int
+	var limitOpt *int
 
 	switch c.Request.Method {
 	case http.MethodPost:
@@ -150,8 +152,38 @@ func (s *AppServer) searchFeedsHandler(c *gin.Context) {
 		}
 		keyword = searchReq.Keyword
 		filters = searchReq.Filters
+		maxScrolls = searchReq.MaxScrolls
+		limitOpt = searchReq.Limit
+		if err := xiaohongshu.ValidateSearchOptions(maxScrolls, limitOpt); err != nil {
+			respondError(c, 400, "INVALID_REQUEST", "请求参数错误", err.Error())
+			return
+		}
+		if limitOpt != nil {
+			limit = *limitOpt
+		}
 	default:
 		keyword = c.Query("keyword")
+		if _, present := c.GetQuery("max_scrolls"); present {
+			parsed, err := strconv.Atoi(c.Query("max_scrolls"))
+			if err != nil {
+				respondError(c, 400, "INVALID_REQUEST", "请求参数错误", "max_scrolls must be an integer")
+				return
+			}
+			maxScrolls = parsed
+		}
+		if _, present := c.GetQuery("limit"); present {
+			parsed, err := strconv.Atoi(c.Query("limit"))
+			if err != nil {
+				respondError(c, 400, "INVALID_REQUEST", "请求参数错误", "limit must be an integer")
+				return
+			}
+			limit = parsed
+			limitOpt = &limit
+		}
+		if err := xiaohongshu.ValidateSearchOptions(maxScrolls, limitOpt); err != nil {
+			respondError(c, 400, "INVALID_REQUEST", "请求参数错误", err.Error())
+			return
+		}
 	}
 
 	if keyword == "" {
@@ -160,7 +192,7 @@ func (s *AppServer) searchFeedsHandler(c *gin.Context) {
 		return
 	}
 
-	result, err := s.xiaohongshuService.SearchFeeds(c.Request.Context(), keyword, filters)
+	result, err := s.xiaohongshuService.SearchFeedsWithOptions(c.Request.Context(), keyword, xiaohongshu.SearchScrollConfig{MaxScrolls: maxScrolls, Limit: limit}, filters)
 	if err != nil {
 		respondError(c, http.StatusInternalServerError, "SEARCH_FEEDS_FAILED",
 			"搜索Feeds失败", err.Error())

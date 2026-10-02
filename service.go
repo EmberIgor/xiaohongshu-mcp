@@ -87,6 +87,14 @@ type FeedsListResponse struct {
 	Count int                `json:"count"`
 }
 
+type SearchFeedsResponse struct {
+	Feeds            []xiaohongshu.Feed `json:"feeds"`
+	Count            int                `json:"count"`
+	InitialCount     int                `json:"initial_count"`
+	ScrollsPerformed int                `json:"scrolls_performed"`
+	StopReason       string             `json:"stop_reason"`
+}
+
 // UserProfileResponse 用户主页响应
 type UserProfileResponse struct {
 	UserBasicInfo xiaohongshu.UserBasicInfo      `json:"userBasicInfo"`
@@ -390,6 +398,28 @@ func (s *XiaohongshuService) ListFeeds(ctx context.Context) (*FeedsListResponse,
 }
 
 func (s *XiaohongshuService) SearchFeeds(ctx context.Context, keyword string, filters ...xiaohongshu.FilterOption) (*FeedsListResponse, error) {
+	r, err := s.SearchFeedsWithOptions(ctx, keyword, xiaohongshu.SearchScrollConfig{}, filters...)
+	if err != nil {
+		return nil, err
+	}
+	return &FeedsListResponse{Feeds: r.Feeds, Count: r.Count}, nil
+}
+
+func (s *XiaohongshuService) SearchFeedsWithOptions(ctx context.Context, keyword string, cfg xiaohongshu.SearchScrollConfig, filters ...xiaohongshu.FilterOption) (*SearchFeedsResponse, error) {
+	if cfg.MaxScrolls < 0 || cfg.MaxScrolls > 3 {
+		return nil, fmt.Errorf("max_scrolls must be between 0 and 3")
+	}
+	if cfg.Limit < 0 || cfg.Limit > 200 {
+		return nil, fmt.Errorf("limit must be between 1 and 200")
+	}
+	if err := xiaohongshu.ValidateSearchFilters(filters...); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
+	defer cancel()
 	b := newBrowser()
 	defer b.Close()
 
@@ -398,14 +428,14 @@ func (s *XiaohongshuService) SearchFeeds(ctx context.Context, keyword string, fi
 
 	action := xiaohongshu.NewSearchAction(page)
 
-	feeds, err := action.Search(ctx, keyword, filters...)
+	outcome, err := action.SearchWithConfig(ctx, keyword, cfg, filters...)
 	if err != nil {
 		return nil, err
 	}
 
-	response := &FeedsListResponse{
-		Feeds: feeds,
-		Count: len(feeds),
+	response := &SearchFeedsResponse{
+		Feeds: outcome.Feeds, Count: len(outcome.Feeds), InitialCount: outcome.Metadata.InitialCount,
+		ScrollsPerformed: outcome.Metadata.ScrollsPerformed, StopReason: outcome.Metadata.StopReason,
 	}
 
 	return response, nil

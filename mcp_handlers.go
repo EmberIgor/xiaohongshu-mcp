@@ -315,7 +315,14 @@ func (s *AppServer) handleSearchFeeds(ctx context.Context, args SearchFeedsArgs)
 		Location:    args.Filters.Location,
 	}
 
-	result, err := s.xiaohongshuService.SearchFeeds(ctx, args.Keyword, filter)
+	if err := xiaohongshu.ValidateSearchOptions(args.MaxScrolls, args.Limit); err != nil {
+		return &MCPToolResult{Content: []MCPContent{{Type: "text", Text: "搜索Feeds失败: " + err.Error()}}, IsError: true}
+	}
+	limit := 0
+	if args.Limit != nil {
+		limit = *args.Limit
+	}
+	result, err := s.xiaohongshuService.SearchFeedsWithOptions(ctx, args.Keyword, xiaohongshu.SearchScrollConfig{MaxScrolls: args.MaxScrolls, Limit: limit}, filter)
 	if err != nil {
 		return &MCPToolResult{
 			Content: []MCPContent{{
