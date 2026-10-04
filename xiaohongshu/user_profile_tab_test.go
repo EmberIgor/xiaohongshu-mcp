@@ -1,6 +1,8 @@
 package xiaohongshu
 
 import (
+	"encoding/json"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -54,6 +56,18 @@ func TestMakeUserProfileURL(t *testing.T) {
 
 	liked := makeUserProfileURL("uid1", "tok1", TabLiked)
 	assert.Contains(t, liked, "tab=liked")
+}
+
+func TestProfileURLTokenIsQueryEncodedAndInternalUIDDoesNotChangeMyProfileJSON(t *testing.T) {
+	token := "token +/&=?"
+	raw := makeUserProfileURL("uid1", token, TabNotes)
+	parsed, err := url.Parse(raw)
+	assert.NoError(t, err)
+	assert.Equal(t, token, parsed.Query().Get("xsec_token"))
+	profile := UserProfileResponse{UserID: "0123456789abcdef01234567"}
+	encoded, err := json.Marshal(profile)
+	assert.NoError(t, err)
+	assert.NotContains(t, string(encoded), "user_id", "the existing get_my_profile response stays unchanged")
 }
 
 // tabLabel 要覆盖全部 tab，缺一个会让切换时找不到目标而报错。

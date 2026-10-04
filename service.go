@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/go-rod/rod"
@@ -97,6 +99,7 @@ type SearchFeedsResponse struct {
 
 // UserProfileResponse 用户主页响应
 type UserProfileResponse struct {
+	UserID        string                         `json:"user_id,omitempty"`
 	UserBasicInfo xiaohongshu.UserBasicInfo      `json:"userBasicInfo"`
 	Interactions  []xiaohongshu.UserInteractions `json:"interactions"`
 	Feeds         []xiaohongshu.Feed             `json:"feeds"`
@@ -470,7 +473,11 @@ func (s *XiaohongshuService) GetFeedDetailWithConfig(ctx context.Context, feedID
 }
 
 // UserProfile 获取用户信息
-func (s *XiaohongshuService) UserProfile(ctx context.Context, userID, xsecToken, tab string) (*UserProfileResponse, error) {
+func (s *XiaohongshuService) UserProfile(ctx context.Context, userID, xsecToken, profileURL, tab string) (*UserProfileResponse, error) {
+	resolved, err := xiaohongshu.ResolveProfileInput(ctx, userID, xsecToken, profileURL)
+	if err != nil {
+		return nil, err
+	}
 	parsed, err := xiaohongshu.ParseProfileTab(tab)
 	if err != nil {
 		return nil, err
@@ -484,11 +491,15 @@ func (s *XiaohongshuService) UserProfile(ctx context.Context, userID, xsecToken,
 
 	action := xiaohongshu.NewUserProfileAction(page)
 
-	result, err := action.UserProfile(ctx, userID, xsecToken, parsed)
+	result, err := action.UserProfile(ctx, resolved.UserID, resolved.XsecToken, parsed)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%s", redactProfileToken(err.Error(), resolved.XsecToken))
+	}
+	if strings.TrimSpace(result.UserBasicInfo.Nickname) == "" && len(result.Feeds) == 0 && len(result.Interactions) == 0 {
+		return nil, fmt.Errorf("profile page contained no useful structured profile data")
 	}
 	response := &UserProfileResponse{
+		UserID:        result.UserID,
 		UserBasicInfo: result.UserBasicInfo,
 		Interactions:  result.Interactions,
 		Feeds:         result.Feeds,
@@ -496,6 +507,15 @@ func (s *XiaohongshuService) UserProfile(ctx context.Context, userID, xsecToken,
 
 	return response, nil
 
+}
+
+func redactProfileToken(message, token string) string {
+	if token == "" {
+		return message
+	}
+	message = strings.ReplaceAll(message, token, "[redacted]")
+	message = strings.ReplaceAll(message, url.QueryEscape(token), "[redacted]")
+	return strings.ReplaceAll(message, url.PathEscape(token), "[redacted]")
 }
 
 // PostCommentToFeed 发表评论到Feed

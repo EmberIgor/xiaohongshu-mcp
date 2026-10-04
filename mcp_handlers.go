@@ -472,33 +472,12 @@ func (s *AppServer) handleGetFeedDetail(ctx context.Context, args map[string]any
 func (s *AppServer) handleUserProfile(ctx context.Context, args map[string]any) *MCPToolResult {
 	logrus.Info("MCP: 获取用户主页")
 
-	userID, ok := args["user_id"].(string)
-	if !ok || userID == "" {
-		return &MCPToolResult{
-			Content: []MCPContent{{
-				Type: "text",
-				Text: "获取用户主页失败: 缺少user_id参数",
-			}},
-			IsError: true,
-		}
-	}
-
-	xsecToken, ok := args["xsec_token"].(string)
-	if !ok || xsecToken == "" {
-		return &MCPToolResult{
-			Content: []MCPContent{{
-				Type: "text",
-				Text: "获取用户主页失败: 缺少xsec_token参数",
-			}},
-			IsError: true,
-		}
-	}
-
-	logrus.Infof("MCP: 获取用户主页 - User ID: %s", userID)
-
+	userID, _ := args["user_id"].(string)
+	xsecToken, _ := args["xsec_token"].(string)
+	profileURL, _ := args["profile_url"].(string)
 	tab, _ := args["tab"].(string)
 
-	result, err := s.xiaohongshuService.UserProfile(ctx, userID, xsecToken, tab)
+	result, err := s.xiaohongshuService.UserProfile(ctx, userID, xsecToken, profileURL, tab)
 	if err != nil {
 		return &MCPToolResult{
 			Content: []MCPContent{{

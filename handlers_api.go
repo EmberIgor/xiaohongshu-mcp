@@ -243,8 +243,13 @@ func (s *AppServer) userProfileHandler(c *gin.Context) {
 			"请求参数错误", err.Error())
 		return
 	}
+	resolved, err := xiaohongshu.ResolveProfileInput(c.Request.Context(), req.UserID, req.XsecToken, req.ProfileURL)
+	if err != nil {
+		respondError(c, http.StatusBadRequest, "INVALID_REQUEST", "请求参数错误", err.Error())
+		return
+	}
 
-	result, err := s.xiaohongshuService.UserProfile(c.Request.Context(), req.UserID, req.XsecToken, req.Tab)
+	result, err := s.xiaohongshuService.UserProfile(c.Request.Context(), resolved.UserID, resolved.XsecToken, "", req.Tab)
 	if err != nil {
 		respondError(c, http.StatusInternalServerError, "GET_USER_PROFILE_FAILED",
 			"获取用户主页失败", err.Error())

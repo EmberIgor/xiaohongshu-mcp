@@ -69,9 +69,10 @@ type FeedDetailArgs struct {
 
 // UserProfileArgs 获取用户主页的参数
 type UserProfileArgs struct {
-	UserID    string `json:"user_id" jsonschema:"小红书用户ID，从Feed列表获取"`
-	XsecToken string `json:"xsec_token" jsonschema:"访问令牌，从Feed列表的xsecToken字段获取"`
-	Tab       string `json:"tab,omitempty" jsonschema:"主页 tab: note(笔记,默认)|fav(收藏)|liked(点赞)。收藏和点赞可能被对方设为不公开"`
+	UserID     string `json:"user_id,omitempty" jsonschema:"小红书用户ID，从Feed列表获取；或通过 profile_url 提供"`
+	XsecToken  string `json:"xsec_token,omitempty" jsonschema:"可选访问令牌，从Feed列表的xsecToken字段获取"`
+	ProfileURL string `json:"profile_url,omitempty" jsonschema:"可选小红书个人主页URL或受支持分享链接"`
+	Tab        string `json:"tab,omitempty" jsonschema:"主页 tab: note(笔记,默认)|fav(收藏)|liked(点赞)。收藏和点赞可能被对方设为不公开"`
 }
 
 // MyProfileArgs 我的主页参数
@@ -345,9 +346,10 @@ func registerTools(server *mcp.Server, appServer *AppServer) {
 		},
 		withPanicRecovery("user_profile", func(ctx context.Context, req *mcp.CallToolRequest, args UserProfileArgs) (*mcp.CallToolResult, any, error) {
 			argsMap := map[string]interface{}{
-				"user_id":    args.UserID,
-				"xsec_token": args.XsecToken,
-				"tab":        args.Tab,
+				"user_id":     args.UserID,
+				"xsec_token":  args.XsecToken,
+				"profile_url": args.ProfileURL,
+				"tab":         args.Tab,
 			}
 			result := appServer.handleUserProfile(ctx, argsMap)
 			return convertToMCPResult(result), nil, nil

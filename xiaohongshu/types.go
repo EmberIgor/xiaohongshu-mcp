@@ -271,6 +271,7 @@ type Comment struct {
 
 // UserProfileResponse 用户详情页完整响应
 type UserProfileResponse struct {
+	UserID        string             `json:"-"` // verified structured UID; intentionally absent from get_my_profile JSON
 	UserBasicInfo UserBasicInfo      `json:"userBasicInfo"`
 	Interactions  []UserInteractions `json:"interactions"`
 	Feeds         []Feed             `json:"feeds"`
