@@ -239,11 +239,8 @@ func (s *SearchAction) SearchWithConfig(ctx context.Context, keyword string, cfg
 	if err := page.Navigate(searchURL); err != nil {
 		return SearchOutcome{}, fmt.Errorf("search navigation failed: %w", err)
 	}
-	if err := page.WaitStable(2 * time.Second); err != nil {
-		return SearchOutcome{}, fmt.Errorf("search page did not stabilize: %w", err)
-	}
-	if err := page.Wait(rod.Eval(`() => window.__INITIAL_STATE__ !== undefined || document.readyState === 'complete'`)); err != nil {
-		return SearchOutcome{}, fmt.Errorf("search page state wait failed: %w", err)
+	if err := waitSearchReady(ctx, page); err != nil {
+		return SearchOutcome{}, err
 	}
 	humanize.Delay(ctx, humanize.AfterNavigate)
 	if err := ctx.Err(); err != nil {
@@ -312,6 +309,46 @@ func (s *SearchAction) SearchWithConfig(ctx context.Context, keyword string, cfg
 		}
 	}
 	return collectSearch(ctx, &rodSearchSource{page: page, skipInitialState: len(pending) > 0}, cfg)
+}
+
+// searchFirstScreenJS 判断首屏结果是否已经出来（IS 里的 feeds、被动捕获的
+// 批次、或已经渲染出的笔记卡片，任一即可）。
+const searchFirstScreenJS = `() => {
+	const f = window.__INITIAL_STATE__?.search?.feeds;
+	const v = f ? (f.value !== undefined ? f.value : f._value) : null;
+	const hasState = Array.isArray(v) && v.length > 0;
+	const hasBatch = (window.__xhsSearchBatches || []).some(b => (b?.data?.items || []).length > 0);
+	const hasDom = document.querySelectorAll('#noteContainer .note-item, section.note-item').length > 0;
+	return hasState || hasBatch || hasDom;
+}`
+
+// waitSearchReady 等搜索页就绪。替代原先的 WaitStable。
+//
+// 为什么不能再用 WaitStable：它内部的 WaitRequestIdle(2s) 要求「连续 2 秒没有
+// 任何在途请求」，而搜索页会持续发打点（t2…/api/v2/collect）、APM 上报和 IM 轮询，
+// 经常整段预算里都不出现这种静默窗口。更糟的是 WaitRequestIdle 的错误在 rod 内部
+// 被丢弃、返回 nil，于是 WaitStable 会「成功地」静默吃掉整个 ctx 预算，让紧随其后的
+// 等待在已过期的 context 上立刻失败，报出与真实原因无关的
+// 「search page state wait failed: context deadline exceeded」。
+// 实测：成功时 WaitStable 约 8 秒（等到静默窗口），失败时整整 89 秒。
+//
+// 改成三段各自有界、语义明确的等待：唯一硬条件是 __INITIAL_STATE__（采集真正依赖
+// 的东西，通常 1~2 秒就位）；load 完成与首屏结果都是尽力而为，超时只记日志继续。
+// 任何一步都不会吃光总预算，失败时的错误也指向真实原因。
+func waitSearchReady(ctx context.Context, page *rod.Page) error {
+	if err := page.Context(ctx).Timeout(25 * time.Second).
+		Wait(rod.Eval(`() => window.__INITIAL_STATE__ !== undefined`)); err != nil {
+		return fmt.Errorf("search page state wait failed: %w", err)
+	}
+	if err := page.Context(ctx).Timeout(10 * time.Second).
+		Wait(rod.Eval(`() => document.readyState === 'complete'`)); err != nil {
+		logrus.Warnf("搜索页 load 未在 10 秒内完成，继续采集: %v", err)
+	}
+	if err := page.Context(ctx).Timeout(8 * time.Second).
+		Wait(rod.Eval(searchFirstScreenJS)); err != nil {
+		logrus.Warnf("首屏结果未在 8 秒内就绪，继续采集: %v", err)
+	}
+	return nil
 }
 
 // feedIDsJS 读当前结果集的 id 列表，用来判断数据有没有换一批。
