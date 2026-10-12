@@ -119,8 +119,64 @@ func TestSearchBrowserFixture(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, filtered, 1, "capture hook must remain live after filtered queue clear")
 	require.Equal(t, "filtered", filtered[0].ID)
+
+	// —— 首批接受边界（artifacts/first-batch/SPEC.md §8 的 8/9/10）——
+	// 8) 探针必须只读不消费：连续两次 probe 之后，捕获队列还得原封不动。
+	_, err = p.Eval(`() => { window.__xhsSearchBatches.length=0; window.__INITIAL_STATE__={search:{feeds:{value:[]}}}; window.fixturePayload.data.items[0].id='first'; window.fixturePayload.data.items[0].xsec_token='token-first' }`)
+	require.NoError(t, err)
+	_, err = p.Eval(`() => window.fetch('/api/sns/web/v1/search/notes')`)
+	require.NoError(t, err)
+	time.Sleep(20 * time.Millisecond)
+	probeSource := &rodSearchSource{page: p}
+	first, err := probeSource.probe()
+	require.NoError(t, err)
+	require.Equal(t, 1, first.Collectable)
+	require.True(t, first.HasInitialState)
+	require.Equal(t, 1, evalJSONInt(t, p, `() => (window.__xhsSearchBatches||[]).length`), "probe must not consume the capture queue")
+
+	// 9) 判定阶段的真读，必须作为首批进入采集器，且只交付一次。
+	primed, err := waitFirstCollectable(context.Background(), probeSource, time.Second, 5*time.Millisecond)
+	require.NoError(t, err)
+	require.Len(t, primed, 1)
+	require.Equal(t, "first", primed[0].ID)
+	require.Equal(t, 0, evalJSONInt(t, p, `() => (window.__xhsSearchBatches||[]).length`), "the accepted read consumes the queue")
+	probeSource.primed = primed
+	primedAcc := searchAccumulator{}
+	batch, err := probeSource.read()
+	require.NoError(t, err)
+	require.Len(t, batch, 1, "primed first batch must reach the collector")
+	require.Equal(t, 1, primedAcc.add(batch))
+	require.Equal(t, "token-first", primedAcc.feeds()[0].XsecToken)
+	again, err := probeSource.read()
+	require.NoError(t, err)
+	require.Empty(t, again, "primed first batch must not be delivered twice")
+
+	// 10) B1 反例：IS 存在但 feeds 为空、队列为空、DOM 有笔记卡片 —— 修复前这里会
+	// 走「成功的 0 条」，现在必须是可识别的未确认。
+	_, err = p.Eval(`() => {
+		window.__xhsSearchBatches.length=0;
+		window.__INITIAL_STATE__={search:{feeds:{value:[]}}};
+		document.body.insertAdjacentHTML('beforeend','<section class="note-item"></section>');
+	}`)
+	require.NoError(t, err)
+	domOnly := &rodSearchSource{page: p}
+	_, err = waitFirstCollectable(context.Background(), domOnly, 60*time.Millisecond, 5*time.Millisecond)
+	require.ErrorIs(t, err, ErrSearchResultUnconfirmed)
+	require.ErrorContains(t, err, "stage=first_collectable_batch")
+	require.ErrorContains(t, err, "dom_notes=1", "DOM cards must not be treated as collectable data")
+
 	require.NoError(t, p.Close())
 	pageClosed = true
 	require.NoError(t, b.Close())
 	closed = true
+}
+
+// evalJSONInt 读一个返回数字的 JS 表达式。
+func evalJSONInt(t *testing.T, p *rod.Page, js string) int {
+	t.Helper()
+	res, err := p.Eval(js)
+	require.NoError(t, err)
+	var n int
+	require.NoError(t, json.Unmarshal([]byte(res.Value.Str()), &n))
+	return n
 }
