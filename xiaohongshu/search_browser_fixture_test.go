@@ -178,27 +178,30 @@ func TestSearchBrowserFixture(t *testing.T) {
 			`[{"id":"x","modelType":"live_v2"}]`,
 			`[{"modelType":"note"},{"id":"","modelType":"note"},{"id":"x","modelType":"live_v2"},{"id":"good","modelType":"note"}]`,
 		} {
-			raw := items
-			if shape != "array" {
-				raw = `{"` + shape + `":` + items + `}`
-			}
-			_, err = p.Eval(`() => {window.__xhsSearchBatches=[];window.__INITIAL_STATE__={search:{feeds:` + raw + `}}}`)
-			require.NoError(t, err)
-			out, outcomeErr := collectSearch(context.Background(), &rodSearchSource{page: p}, SearchScrollConfig{})
-			if caseIndex != 3 {
-				require.Empty(t, out.Feeds)
-				require.ErrorIs(t, outcomeErr, ErrSearchResultUnconfirmed)
-			} else {
-				require.NoError(t, outcomeErr)
-				require.Equal(t, []Feed{feed("good")}, out.Feeds)
-			}
+			t.Run("qualification/"+shape+"/"+[]string{"missing_id", "empty_id", "non_note", "mixed"}[caseIndex], func(t *testing.T) {
+				raw := items
+				if shape != "array" {
+					raw = `{"` + shape + `":` + items + `}`
+				}
+				_, err = p.Eval(`() => {window.__xhsSearchBatches.length=0;window.__INITIAL_STATE__={search:{feeds:` + raw + `}}}`)
+				require.NoError(t, err)
+				out, outcomeErr := collectSearch(context.Background(), &rodSearchSource{page: p}, SearchScrollConfig{})
+				if caseIndex != 3 {
+					require.Empty(t, out.Feeds)
+					require.ErrorIs(t, outcomeErr, ErrSearchResultUnconfirmed)
+				} else {
+					require.NoError(t, outcomeErr)
+					require.Equal(t, []Feed{feed("good")}, out.Feeds)
+				}
+			})
 		}
 	}
 
-	// Remove visible signal fixtures before exercising collector behavior.
-	_, err = p.Eval(`() => document.querySelectorAll(".login-modal, .captcha-visible").forEach(e => e.remove())`)
+	// The matrix only changes data, so the earlier signal cleanup remains sufficient.
+
+	// Lifecycle owns its data; preserve the capture queue retained by the hook.
+	_, err = p.Eval(`() => { window.__xhsSearchBatches.length=0; window.__INITIAL_STATE__={search:{feeds:{value:[{id:'lifecycle-own',modelType:'note'}]}}}; }`)
 	require.NoError(t, err)
-	require.NoError(t, checkSearchSignals(p), "signal fixtures must be cleared")
 
 	// Cancel the first-batch child after acceptance: the request page remains usable.
 	requestCtx, requestCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -209,13 +212,15 @@ func TestSearchBrowserFixture(t *testing.T) {
 	lifecycle := &rodSearchSource{page: requestPage}
 	accepted, acceptErr := waitFirstCollectable(child, lifecycle, time.Second, testPoll)
 	require.NoError(t, acceptErr)
+	require.Equal(t, []Feed{feed("lifecycle-own")}, accepted)
 	childCancel()
 	lifecycle.primed = accepted
 	require.NoError(t, lifecycle.signal())
 	require.NoError(t, lifecycle.scroll())
 	out, outcomeErr := collectSearchWithTiming(requestCtx, lifecycle, SearchScrollConfig{MaxScrolls: 1}, time.Millisecond, time.Millisecond)
 	require.NoError(t, outcomeErr)
-	require.NotEmpty(t, out.Feeds)
+	require.Equal(t, []Feed{feed("lifecycle-own")}, out.Feeds)
+	require.Equal(t, 1, out.Metadata.InitialCount)
 	require.Equal(t, 1, out.Metadata.ScrollsPerformed)
 	deadlineAfter, stillHasDeadline := requestPage.GetContext().Deadline()
 	require.Equal(t, hasDeadline, stillHasDeadline)
