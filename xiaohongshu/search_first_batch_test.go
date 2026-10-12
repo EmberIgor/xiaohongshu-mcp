@@ -174,3 +174,104 @@ func TestSearchSnapshotDecodeIgnoresNonNotes(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, got)
 }
+
+// Matrix exercises the business outcome after the snapshot's JS-equivalent wrapper extraction.
+// The browser fixture additionally verifies the actual JS extraction.
+func TestFirstBatchQualificationOutcomeMatrix(t *testing.T) {
+	for _, shape := range []string{"array", "value", "_value"} {
+		for _, tc := range []struct {
+			name, items string
+			valid       bool
+		}{
+			{"missing_id", `[{"modelType":"note"}]`, false},
+			{"empty_id", `[{"id":"","modelType":"note"}]`, false},
+			{"non_note", `[{"id":"x","modelType":"live_v2"}]`, false},
+			{"mixed", `[{"modelType":"note"},{"id":"","modelType":"note"},{"id":"x","modelType":"hot_query"},{"id":"good","modelType":"note"}]`, true},
+		} {
+			t.Run(shape+"/"+tc.name, func(t *testing.T) {
+				raw := json.RawMessage(tc.items)
+				if shape != "array" {
+					wrapped := []byte(`{"` + shape + `":` + tc.items + `}`)
+					var fields map[string]json.RawMessage
+					require.NoError(t, json.Unmarshal(wrapped, &fields))
+					raw = fields[shape]
+				}
+				fs, err := (searchSnapshot{State: raw}).decode(true)
+				require.NoError(t, err)
+				out, err := collectSearch(context.Background(), &fakeSearchSource{batches: [][]Feed{fs}}, SearchScrollConfig{})
+				if !tc.valid {
+					require.ErrorIs(t, err, ErrSearchResultUnconfirmed)
+					require.Empty(t, out.Feeds)
+					require.ErrorContains(t, err, "terminal_assertion")
+				} else {
+					require.NoError(t, err)
+					require.Equal(t, []Feed{feed("good")}, out.Feeds)
+					require.Equal(t, 1, out.Metadata.InitialCount)
+				}
+				require.Equal(t, "max_scrolls_reached", out.Metadata.StopReason)
+			})
+		}
+	}
+}
+
+type cancelOnReadSource struct {
+	fakeCollectableSource
+	cancel context.CancelFunc
+}
+
+func (s *cancelOnReadSource) read() ([]Feed, error) {
+	s.cancel()
+	return s.fakeCollectableSource.read()
+}
+func TestFirstBatchCancellationWithAvailableData(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	src := &fakeCollectableSource{probes: []int{1}, readFeed: []Feed{feed("a")}}
+	got, err := waitFirstCollectable(ctx, src, testBudget, testPoll)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Empty(t, got)
+	require.Zero(t, src.probeIdx)
+	require.Zero(t, src.reads)
+
+	ctx, cancel = context.WithCancel(context.Background())
+	during := &cancelOnReadSource{fakeCollectableSource: *src, cancel: cancel}
+	got, err = waitFirstCollectable(ctx, during, testBudget, testPoll)
+	require.ErrorIs(t, err, context.Canceled)
+	require.Empty(t, got)
+}
+func TestFirstBatchBudgetClampsSleep(t *testing.T) {
+	const budget = 20 * time.Millisecond
+	const poll = 250 * time.Millisecond
+	src := &fakeCollectableSource{probes: []int{0, 1}, readFeed: []Feed{feed("late")}}
+	start := time.Now()
+	got, err := waitFirstCollectable(context.Background(), src, budget, poll)
+	elapsed := time.Since(start)
+	require.ErrorIs(t, err, ErrSearchResultUnconfirmed)
+	require.Empty(t, got)
+	require.LessOrEqual(t, elapsed-budget, poll)
+	require.Equal(t, 1, src.probeIdx, "must abandon before starting a post-budget probe")
+	require.ErrorContains(t, err, "budget=")
+	require.ErrorContains(t, err, "elapsed=")
+}
+
+// A single in-flight read may exceed budget; budget is not an I/O deadline.
+type slowReadSource struct{ fakeCollectableSource }
+
+func (s *slowReadSource) read() ([]Feed, error) {
+	time.Sleep(30 * time.Millisecond)
+	return s.fakeCollectableSource.read()
+}
+func TestFirstBatchAllowsInFlightReadBeyondBudget(t *testing.T) {
+	src := &slowReadSource{fakeCollectableSource{probes: []int{1}, readFeed: []Feed{feed("a")}}}
+	got, err := waitFirstCollectable(context.Background(), src, time.Millisecond, testPoll)
+	require.NoError(t, err)
+	require.Equal(t, []Feed{feed("a")}, got)
+}
+func TestCollectSearchTerminalAssertionCoversPartialExit(t *testing.T) {
+	src := &fakeSearchSource{signalErrAt: 2}
+	out, err := collectSearch(context.Background(), src, SearchScrollConfig{MaxScrolls: 1})
+	require.ErrorIs(t, err, ErrSearchResultUnconfirmed)
+	require.Equal(t, "risk_control", out.Metadata.StopReason)
+	require.ErrorContains(t, err, "terminal_assertion=zero_collectable_notes stop_reason=risk_control")
+	require.Empty(t, out.Feeds)
+}

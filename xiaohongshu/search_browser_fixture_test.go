@@ -165,6 +165,63 @@ func TestSearchBrowserFixture(t *testing.T) {
 	require.ErrorContains(t, err, "stage=first_collectable_batch")
 	require.ErrorContains(t, err, "dom_notes=1", "DOM cards must not be treated as collectable data")
 
+	// Remove visible signal fixtures before exercising collector behavior.
+	_, err = p.Eval(`() => document.querySelectorAll(".login-modal, .captcha-visible").forEach(e => e.remove())`)
+	require.NoError(t, err)
+	require.NoError(t, checkSearchSignals(p), "signal fixtures must be cleared")
+
+	// Actual JS wrapper extraction must reach the final business outcome.
+	for _, shape := range []string{"array", "value", "_value"} {
+		for caseIndex, items := range []string{
+			`[{"modelType":"note"}]`,
+			`[{"id":"","modelType":"note"}]`,
+			`[{"id":"x","modelType":"live_v2"}]`,
+			`[{"modelType":"note"},{"id":"","modelType":"note"},{"id":"x","modelType":"live_v2"},{"id":"good","modelType":"note"}]`,
+		} {
+			raw := items
+			if shape != "array" {
+				raw = `{"` + shape + `":` + items + `}`
+			}
+			_, err = p.Eval(`() => {window.__xhsSearchBatches=[];window.__INITIAL_STATE__={search:{feeds:` + raw + `}}}`)
+			require.NoError(t, err)
+			out, outcomeErr := collectSearch(context.Background(), &rodSearchSource{page: p}, SearchScrollConfig{})
+			if caseIndex != 3 {
+				require.Empty(t, out.Feeds)
+				require.ErrorIs(t, outcomeErr, ErrSearchResultUnconfirmed)
+			} else {
+				require.NoError(t, outcomeErr)
+				require.Equal(t, []Feed{feed("good")}, out.Feeds)
+			}
+		}
+	}
+
+	// Remove visible signal fixtures before exercising collector behavior.
+	_, err = p.Eval(`() => document.querySelectorAll(".login-modal, .captcha-visible").forEach(e => e.remove())`)
+	require.NoError(t, err)
+	require.NoError(t, checkSearchSignals(p), "signal fixtures must be cleared")
+
+	// Cancel the first-batch child after acceptance: the request page remains usable.
+	requestCtx, requestCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer requestCancel()
+	requestPage := p.Context(requestCtx)
+	deadlineBefore, hasDeadline := requestPage.GetContext().Deadline()
+	child, childCancel := context.WithCancel(requestCtx)
+	lifecycle := &rodSearchSource{page: requestPage}
+	accepted, acceptErr := waitFirstCollectable(child, lifecycle, time.Second, testPoll)
+	require.NoError(t, acceptErr)
+	childCancel()
+	lifecycle.primed = accepted
+	require.NoError(t, lifecycle.signal())
+	require.NoError(t, lifecycle.scroll())
+	out, outcomeErr := collectSearchWithTiming(requestCtx, lifecycle, SearchScrollConfig{MaxScrolls: 1}, time.Millisecond, time.Millisecond)
+	require.NoError(t, outcomeErr)
+	require.NotEmpty(t, out.Feeds)
+	require.Equal(t, 1, out.Metadata.ScrollsPerformed)
+	deadlineAfter, stillHasDeadline := requestPage.GetContext().Deadline()
+	require.Equal(t, hasDeadline, stillHasDeadline)
+	require.Equal(t, deadlineBefore, deadlineAfter)
+	require.NoError(t, requestPage.GetContext().Err())
+
 	require.NoError(t, p.Close())
 	pageClosed = true
 	require.NoError(t, b.Close())

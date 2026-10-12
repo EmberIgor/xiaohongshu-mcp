@@ -190,7 +190,16 @@ func (s searchSnapshot) decode(useInitialState bool) ([]Feed, error) {
 		}
 		var fs []Feed
 		er := json.Unmarshal(raw, &fs)
-		return onlyNotes(fs), er
+		if er != nil {
+			return nil, er
+		}
+		notes := make([]Feed, 0, len(fs))
+		for _, f := range fs {
+			if isCollectableNote(f) {
+				notes = append(notes, f)
+			}
+		}
+		return notes, nil
 	}
 	var out []Feed
 	if useInitialState && len(s.Batches) == 0 && len(s.State) > 0 {
@@ -486,13 +495,26 @@ func waitFirstCollectable(ctx context.Context, src collectableSource, budget, po
 	deadline := start.Add(budget)
 	var last searchProbe
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if !time.Now().Before(deadline) {
+			return nil, fmt.Errorf("%w: stage=first_collectable_batch budget=%s elapsed=%s %s",
+				ErrSearchResultUnconfirmed, budget, time.Since(start).Round(time.Millisecond), last)
+		}
 		p, err := src.probe()
+		if parentErr := ctx.Err(); parentErr != nil {
+			return nil, parentErr
+		}
 		if err != nil {
 			return nil, fmt.Errorf("stage=first_collectable_batch: probe search results: %w", err)
 		}
 		last = p
 		if p.Collectable > 0 {
 			feeds, err := src.read()
+			if parentErr := ctx.Err(); parentErr != nil {
+				return nil, parentErr
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -503,14 +525,11 @@ func waitFirstCollectable(ctx context.Context, src collectableSource, budget, po
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if !time.Now().Before(deadline) {
-			return nil, fmt.Errorf("%w: stage=first_collectable_batch budget=%s elapsed=%s %s",
-				ErrSearchResultUnconfirmed, budget, time.Since(start).Round(time.Millisecond), last)
-		}
+		sleep := min(poll, time.Until(deadline))
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-time.After(poll):
+		case <-time.After(sleep):
 		}
 	}
 }

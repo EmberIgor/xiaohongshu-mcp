@@ -31,6 +31,11 @@ type Feed struct {
 // modelTypeNote 笔记条目的 modelType 取值。
 const modelTypeNote = "note"
 
+// isCollectableNote 是搜索解码与 accumulator 共用的接纳判据。
+func isCollectableNote(f Feed) bool {
+	return f.ModelType == modelTypeNote && f.ID != ""
+}
+
 // onlyNotes 滤掉非笔记条目。
 //
 // 站点返回的列表里混着直播卡片（live_v2）和搜索热词（hot_query），它们没有

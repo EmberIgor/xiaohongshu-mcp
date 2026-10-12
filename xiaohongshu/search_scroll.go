@@ -3,6 +3,7 @@ package xiaohongshu
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -27,7 +28,19 @@ type searchSource interface {
 func collectSearch(ctx context.Context, src searchSource, cfg SearchScrollConfig) (SearchOutcome, error) {
 	return collectSearchWithTiming(ctx, src, cfg, 8*time.Second, 250*time.Millisecond)
 }
-func collectSearchWithTiming(ctx context.Context, src searchSource, cfg SearchScrollConfig, roundTimeout, poll time.Duration) (SearchOutcome, error) {
+func collectSearchWithTiming(ctx context.Context, src searchSource, cfg SearchScrollConfig, roundTimeout, poll time.Duration) (result SearchOutcome, resultErr error) {
+	// 所有成功出口共用一处终局断言；不改变部分结果的 StopReason。
+	defer func() {
+		if resultErr != nil {
+			return
+		}
+		for _, f := range result.Feeds {
+			if isCollectableNote(f) {
+				return
+			}
+		}
+		resultErr = fmt.Errorf("%w: stage=search_outcome terminal_assertion=zero_collectable_notes stop_reason=%s", ErrSearchResultUnconfirmed, result.Metadata.StopReason)
+	}()
 	a := searchAccumulator{}
 	if err := src.signal(); err != nil {
 		return SearchOutcome{}, err
@@ -160,7 +173,7 @@ func normalizeSearchItems(payload []byte) ([]Feed, error) {
 		if err := json.Unmarshal(b, &f); err != nil {
 			return nil, err
 		}
-		if f.ModelType == modelTypeNote && f.ID != "" {
+		if isCollectableNote(f) {
 			out = append(out, f)
 		}
 	}
@@ -216,7 +229,7 @@ func (a *searchAccumulator) add(batch []Feed) int {
 		a.first = true
 		ids := map[string]bool{}
 		for _, f := range batch {
-			if f.ModelType == modelTypeNote && f.ID != "" {
+			if isCollectableNote(f) {
 				ids[f.ID] = true
 			}
 		}
@@ -227,7 +240,7 @@ func (a *searchAccumulator) add(batch []Feed) int {
 	}
 	before := len(a.items)
 	for _, f := range batch {
-		if f.ModelType != modelTypeNote || f.ID == "" || a.seen[f.ID] {
+		if !isCollectableNote(f) || a.seen[f.ID] {
 			continue
 		}
 		a.seen[f.ID] = true
